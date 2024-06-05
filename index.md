@@ -2,6 +2,7 @@
 
 ### GROUP 11 PROJECT
 
-Project report: https://github.com/BU-IE-360/spring24-eylulgulluu/blob/main/IE360Project_Group11_report.nb.html<br> Project code: https://github.com/BU-IE-360/spring24-eylulgulluu/blob/main/IE360_Project_Group11_Code.Rmd
+Project Folder: https://github.com/BU-IE-360/spring24-eylulgulluu/tree/main/proje%20360_11
+
 
 
