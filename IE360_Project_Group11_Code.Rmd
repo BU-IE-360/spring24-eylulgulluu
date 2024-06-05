@@ -1,0 +1,663 @@
+
+```{r}
+require(data.table)
+require(lubridate)
+require(forecast)
+require(skimr)
+require(repr)
+require(readxl)
+require(ggplot2)
+require(tidyverse)
+require(GGally)
+
+options(repr.plot.width=12.7, repr.plot.height=8.5)
+```
+
+
+```{r}
+data_path = "/Users/ahmetkarakose/Desktop/production_may30.csv"
+production_data = fread(data_path)
+unique_production <- production_data[!duplicated(production_data[, c("date", "hour")]), ]
+unique_production <- unique_production[-c((nrow(unique_production)-15*24+1):nrow(unique_production)), ]
+
+data_path <- "/Users/ahmetkarakose/Desktop/processed_weather_may30.csv"
+weather_data <- fread(data_path)
+
+weather_data_modified <- weather_data %>%
+  pivot_wider(names_from = c(lat, lon), values_from = c(dswrf_surface, tcdc_low.cloud.layer, tcdc_middle.cloud.layer, tcdc_high.cloud.layer, tcdc_entire.atmosphere, uswrf_top_of_atmosphere, csnow_surface, dlwrf_surface, uswrf_surface, tmp_surface), names_sep = "_")
+
+weather_modified_ordered <- weather_data_modified[order(weather_data_modified$date, weather_data_modified$hour), ]
+
+weather_modified_ordered$dswrf_surface_avg <- rowMeans(weather_modified_ordered[, 3:27])
+weather_modified_ordered$tcdc_low.cloud.layer_avg <- rowMeans(weather_modified_ordered[, 28:52])
+weather_modified_ordered$tcdc_middle.cloud.layer_avg <- rowMeans(weather_modified_ordered[, 53:77])
+weather_modified_ordered$tcdc_high.cloud.layer_avg <- rowMeans(weather_modified_ordered[, 78:102])
+weather_modified_ordered$tcdc_entire.atmosphere_avg <- rowMeans(weather_modified_ordered[, 103:127])
+weather_modified_ordered$uswrf_top_of_atmosphere_avg <- rowMeans(weather_modified_ordered[, 128:152])
+weather_modified_ordered$csnow_surface_avg <- rowMeans(weather_modified_ordered[, 153:177])
+weather_modified_ordered$dlwrf_surface_avg  <- rowMeans(weather_modified_ordered[, 178:202])
+weather_modified_ordered$uswrf_surface_avg <- rowMeans(weather_modified_ordered[, 203:227])
+weather_modified_ordered$tmp_surface_avg  <- rowMeans(weather_modified_ordered[, 228:252])
+weather_data_final <- cbind(weather_modified_ordered[, 1:2], weather_modified_ordered[, (ncol(weather_modified_ordered)-9):ncol(weather_modified_ordered)])
+
+weather_data_final <- weather_data_final[-c(nrow(unique_production):nrow(weather_data_final))]
+
+selected_columns_production <- unique_production[, c("date", "hour", "production")]
+selected_columns_weather <- weather_data_final[1:nrow(unique_production), c("dswrf_surface_avg", "tcdc_low.cloud.layer_avg", "tcdc_middle.cloud.layer_avg", "tcdc_high.cloud.layer_avg", "tcdc_entire.atmosphere_avg", "uswrf_top_of_atmosphere_avg", "csnow_surface_avg", "dlwrf_surface_avg", "uswrf_surface_avg", "tmp_surface_avg")]
+
+selected_rows <- weather_data_final[(nrow(unique_production) + 1):(nrow(unique_production) + 24*2-4),]
+
+merged_data <- cbind(selected_columns_production, selected_columns_weather)
+merged_data <- rbind(merged_data, selected_rows, fill=TRUE)
+merged_data[, date:=as.Date(date)]
+
+# Create a new column which that makes month, day and hour as a factor
+merged_data[, hour := as.factor(hour)]
+merged_data[, month := factor(month(date), levels = 1:12)]
+merged_data[, day := day(date)]
+```
+
+```{r}
+accu=function(actual,forecast){
+  n=length(actual)
+  error=actual-forecast
+  mean=mean(actual)
+  sd=sd(actual)
+  CV=sd/mean
+  FBias=sum(error)/sum(actual)
+  MAPE=sum(abs(error/actual))/n
+  RMSE=sqrt(sum(error^2)/n)
+  MAD=sum(abs(error))/n
+  MADP=sum(abs(error))/sum(abs(actual))
+  WMAPE=MAD/mean
+  l=data.frame(n,mean,sd,CV,FBias,MAPE,RMSE,MAD,MADP,WMAPE)
+  return(l)
+  }
+```
+
+
+```{r}
+ggplot(merged_data, aes(x=date)) + geom_line(aes(y=production, color="Production")) +
+ labs(title = "Production vs Time", x = "Date",y = "Production")
+```
+
+
+```{r}
+ggAcf(production_ts, lag.max = 96) + ggtitle("Production ACF")
+```
+
+
+```{r}
+ggpairs(merged_data[, c("production",
+                        "dswrf_surface_avg",
+                        "tcdc_low.cloud.layer_avg",
+                        "tcdc_middle.cloud.layer_avg",
+                        "tcdc_high.cloud.layer_avg",
+                        "tcdc_entire.atmosphere_avg",
+                        "uswrf_top_of_atmosphere_avg",
+                        "csnow_surface_avg",
+                        "dlwrf_surface_avg",
+                        "uswrf_surface_avg",
+                        "tmp_surface_avg")])
+```
+
+Hour 5
+```{r}
+hour5 <- subset(merged_data, hour %in% c(5))
+
+hour5$lag2_prod <- hour5[ , .(lag2_prod = shift(hour5$production,n = 2,fill = NA))]
+hour5$lag3_prod <- hour5[ , .(lag3_prod = shift(hour5$production,n = 3,fill = NA))]
+
+test_start_index <- which(hour5$date == as.Date("2024-02-01"))
+train_data <- hour5[1:(test_start_index - 1), ]
+test_data5 <- hour5[test_start_index:(nrow(hour5)-2), ]
+
+hour5_m1_train <- lm(production ~ lag2_prod +
+                    lag3_prod +
+                    tmp_surface_avg +
+                    -1, train_data)
+
+test_data5$Predicted <- predict(hour5_m1_train, test_data5)
+test_data5$Predicted[test_data5$Predicted < 0] <- 0
+test_data5$Predicted[test_data5$Predicted > 10] <- 10
+
+ggplot(test_data5 ,aes(x=date)) +
+        geom_line(aes(y=production,color='real')) + 
+        geom_line(aes(y=Predicted,color='predicted'))
+
+summary(hour5_m1_train)
+checkresiduals(hour5_m1_train)
+
+accuracy_metrics <- test_data5[,accu(production, Predicted)]
+accuracy_metrics
+
+forecast_horizon <- (nrow(hour5))
+forecast_data5 <- hour5[forecast_horizon, ]
+forecast_data5$Predicted <- predict(hour5_m1_train, newdata = forecast_data5)
+```
+Hour 6
+```{r}
+hour6 <- subset(merged_data, hour %in% c(6))
+
+hour6$lag2_prod <- hour6[ , .(lag2_prod = shift(hour6$production,n = 2,fill = NA))]
+hour6$lag3_prod <- hour6[ , .(lag3_prod = shift(hour6$production,n = 3,fill = NA))]
+
+test_start_index <- which(hour6$date == as.Date("2024-02-01"))
+train_data <- hour6[1:(test_start_index - 1), ]
+test_data6 <- hour6[test_start_index:(nrow(hour6)-2), ]
+
+hour6_m1_train <- lm(production ~ lag2_prod +
+                  lag3_prod +
+                 -1, train_data)
+
+test_data6$Predicted <- predict(hour6_m1_train, test_data6)
+test_data6$Predicted[test_data6$Predicted < 0] <- 0
+test_data6$Predicted[test_data6$Predicted > 10] <- 10
+
+ggplot(test_data6 ,aes(x=date)) +
+        geom_line(aes(y=production,color='real')) + 
+        geom_line(aes(y=Predicted,color='predicted'))
+
+summary(hour6_m1_train)
+checkresiduals(hour6_m1_train)
+
+accuracy_metrics <- test_data6[,accu(production, Predicted)]
+accuracy_metrics
+
+forecast_horizon <- (nrow(hour6))
+forecast_data6 <- hour6[forecast_horizon, ]
+forecast_data6$Predicted <- predict(hour6_m1_train, newdata = forecast_data6)
+```
+Hour 7
+```{r}
+hour7 <- subset(merged_data, hour %in% c(7))
+
+hour7$lag2_prod <- hour7[ , .(lag2_prod = shift(hour7$production,n = 2,fill = NA))]
+hour7$lag3_prod <- hour7[ , .(lag3_prod = shift(hour7$production,n = 3,fill = NA))]
+
+test_start_index <- which(hour7$date == as.Date("2024-02-01"))
+train_data <- hour7[1:(test_start_index - 1), ]
+test_data7 <- hour7[test_start_index:(nrow(hour7)-2), ]
+
+hour7_m1_train <- lm(production ~ lag2_prod + 
+                 lag3_prod +
+                 dlwrf_surface_avg + 
+                 tmp_surface_avg + 
+                 month + 
+                 -1, train_data)
+
+test_data7$Predicted <- predict(hour7_m1_train, test_data7)
+test_data7$Predicted[test_data7$Predicted < 0] <- 0
+test_data7$Predicted[test_data7$Predicted > 10] <- 10
+
+ggplot(test_data7 ,aes(x=date)) +
+        geom_line(aes(y=production,color='real')) + 
+        geom_line(aes(y=Predicted,color='predicted'))
+
+summary(hour7_m1_train)
+checkresiduals(hour7_m1_train)
+
+accuracy_metrics <- test_data7[,accu(production, Predicted)]
+accuracy_metrics
+
+forecast_horizon <- (nrow(hour7))
+forecast_data7 <- hour7[forecast_horizon, ]
+forecast_data7$Predicted <- predict(hour7_m1_train, newdata = forecast_data7)
+```
+Hour 8
+```{r}
+hour8 <- subset(merged_data, hour %in% c(8))
+
+hour8$lag2_prod <- hour8[ , .(lag2_prod = shift(hour8$production,n = 2,fill = NA))]
+hour8$lag3_prod <- hour8[ , .(lag3_prod = shift(hour8$production,n = 3,fill = NA))]
+
+test_start_index <- which(hour8$date == as.Date("2024-02-01"))
+train_data <- hour8[1:(test_start_index - 1), ]
+test_data8 <- hour8[test_start_index:(nrow(hour8)-2), ]
+
+hour8_m1_train <- lm(production ~ lag2_prod + 
+                   lag3_prod + 
+                   dswrf_surface_avg + 
+                   tcdc_low.cloud.layer_avg + 
+                   tcdc_middle.cloud.layer_avg + 
+                   tmp_surface_avg + 
+                   -1, train_data)
+
+test_data8$Predicted <- predict(hour8_m1_train, test_data8)
+test_data8$Predicted[test_data8$Predicted < 0] <- 0
+test_data8$Predicted[test_data8$Predicted > 10] <- 10
+
+ggplot(test_data8 ,aes(x=date)) +
+        geom_line(aes(y=production,color='real')) + 
+        geom_line(aes(y=Predicted,color='predicted'))
+
+summary(hour8_m1_train)
+checkresiduals(hour8_m1_train)
+
+accuracy_metrics <- test_data8[,accu(production, Predicted)]
+accuracy_metrics
+
+forecast_horizon <- (nrow(hour8))
+forecast_data8 <- hour8[forecast_horizon, ]
+forecast_data8$Predicted <- predict(hour8_m1_train, newdata = forecast_data8)
+```
+Hour 9
+```{r}
+hour9 <- subset(merged_data, hour %in% c(9))
+
+hour9$lag2_prod <- hour9[ , .(lag2_prod = shift(hour9$production,n = 2,fill = NA))]
+hour9$lag3_prod <- hour9[ , .(lag3_prod = shift(hour9$production,n = 3,fill = NA))]
+
+test_start_index <- which(hour9$date == as.Date("2024-02-01"))
+train_data <- hour9[1:(test_start_index - 1), ]
+test_data9 <- hour9[test_start_index:(nrow(hour9)-2), ]
+
+hour9_m1_train <- lm(production ~ lag2_prod + 
+                   lag3_prod + 
+                   tcdc_low.cloud.layer_avg + 
+                   tcdc_middle.cloud.layer_avg + 
+                   uswrf_top_of_atmosphere_avg + 
+                   month + 
+                   -1, train_data)
+
+test_data9$Predicted <- predict(hour9_m1_train, test_data9)
+test_data9$Predicted[test_data9$Predicted < 0] <- 0
+test_data9$Predicted[test_data9$Predicted > 10] <- 10
+
+ggplot(test_data9 ,aes(x=date)) +
+        geom_line(aes(y=production,color='real')) + 
+        geom_line(aes(y=Predicted,color='predicted'))
+
+summary(hour9_m1_train)
+checkresiduals(hour9_m1_train)
+
+accuracy_metrics <- test_data9[,accu(production, Predicted)]
+accuracy_metrics
+
+forecast_horizon <- (nrow(hour9))
+forecast_data9 <- hour9[forecast_horizon, ]
+forecast_data9$Predicted <- predict(hour9_m1_train, newdata = forecast_data9)
+```
+Hour 10
+```{r}
+hour10 <- subset(merged_data, hour %in% c(10))
+
+hour10$lag2_prod <- hour10[ , .(lag2_prod = shift(hour10$production,n = 2,fill = NA))]
+hour10$lag3_prod <- hour10[ , .(lag3_prod = shift(hour10$production,n = 3,fill = NA))]
+
+test_start_index <- which(hour10$date == as.Date("2024-02-01"))
+train_data <- hour10[1:(test_start_index - 1), ]
+test_data10 <- hour10[test_start_index:(nrow(hour10)-2), ]
+
+hour10_m1_train <- lm(production ~ lag2_prod + 
+                   tcdc_low.cloud.layer_avg + 
+                   tcdc_middle.cloud.layer_avg + 
+                   tmp_surface_avg + 
+                   -1, train_data)
+
+test_data10$Predicted <- predict(hour10_m1_train, test_data10)
+test_data10$Predicted[test_data10$Predicted < 0] <- 0
+test_data10$Predicted[test_data10$Predicted > 10] <- 10
+
+ggplot(test_data10 ,aes(x=date)) +
+        geom_line(aes(y=production,color='real')) + 
+        geom_line(aes(y=Predicted,color='predicted'))
+
+summary(hour10_m1_train)
+checkresiduals(hour10_m1_train)
+
+accuracy_metrics <- test_data10[,accu(production, Predicted)]
+accuracy_metrics
+
+forecast_horizon <- (nrow(hour10))
+forecast_data10 <- hour10[forecast_horizon, ]
+forecast_data10$Predicted <- predict(hour10_m1_train, newdata = forecast_data10)
+```
+Hour 11
+```{r}
+hour11 <- subset(merged_data, hour %in% c(11))
+
+hour11$lag2_prod <- hour11[ , .(lag2_prod = shift(hour11$production,n = 2,fill = NA))]
+hour11$lag3_prod <- hour11[ , .(lag3_prod = shift(hour11$production,n = 3,fill = NA))]
+
+test_start_index <- which(hour11$date == as.Date("2024-02-01"))
+train_data <- hour11[1:(test_start_index - 1), ]
+test_data11 <- hour11[test_start_index:(nrow(hour11)-2), ]
+
+hour11_m1_train <- lm(production ~ lag2_prod + 
+                   tcdc_low.cloud.layer_avg + 
+                   tcdc_middle.cloud.layer_avg + 
+                   tmp_surface_avg + 
+                   -1, train_data)
+
+test_data11$Predicted <- predict(hour11_m1_train, test_data11)
+test_data11$Predicted[test_data11$Predicted < 0] <- 0
+test_data11$Predicted[test_data11$Predicted > 10] <- 10
+
+ggplot(test_data11 ,aes(x=date)) +
+        geom_line(aes(y=production,color='real')) + 
+        geom_line(aes(y=Predicted,color='predicted'))
+
+summary(hour11_m1_train)
+checkresiduals(hour11_m1_train)
+
+accuracy_metrics <- test_data11[,accu(production, Predicted)]
+accuracy_metrics
+
+forecast_horizon <- (nrow(hour11))
+forecast_data11 <- hour11[forecast_horizon, ]
+forecast_data11$Predicted <- predict(hour11_m1_train, newdata = forecast_data11)
+```
+Hour 12
+```{r}
+hour12 <- subset(merged_data, hour %in% c(12))
+
+hour12$lag2_prod <- hour12[ , .(lag2_prod = shift(hour12$production,n = 2,fill = NA))]
+hour12$lag3_prod <- hour12[ , .(lag3_prod = shift(hour12$production,n = 3,fill = NA))]
+
+test_start_index <- which(hour12$date == as.Date("2024-02-01"))
+train_data <- hour12[1:(test_start_index - 1), ]
+test_data12 <- hour12[test_start_index:(nrow(hour12)-2), ]
+
+hour12_m1_train <- lm(production ~ tcdc_low.cloud.layer_avg + 
+                   tcdc_middle.cloud.layer_avg + 
+                   tcdc_entire.atmosphere_avg + 
+                   uswrf_surface_avg + 
+                   tmp_surface_avg + 
+                   -1, train_data)
+
+test_data12$Predicted <- predict(hour12_m1_train, test_data12)
+test_data12$Predicted[test_data12$Predicted < 0] <- 0
+test_data12$Predicted[test_data12$Predicted > 10] <- 10
+
+ggplot(test_data12 ,aes(x=date)) +
+        geom_line(aes(y=production,color='real')) + 
+        geom_line(aes(y=Predicted,color='predicted'))
+
+summary(hour12_m1_train)
+checkresiduals(hour12_m1_train)
+
+accuracy_metrics <- test_data12[,accu(production, Predicted)]
+accuracy_metrics
+
+forecast_horizon <- (nrow(hour12))
+forecast_data12 <- hour12[forecast_horizon, ]
+forecast_data12$Predicted <- predict(hour12_m1_train, newdata = forecast_data12)
+```
+Hour 13
+```{r}
+hour13 <- subset(merged_data, hour %in% c(13))
+
+hour13$lag2_prod <- hour13[ , .(lag2_prod = shift(hour13$production,n = 2,fill = NA))]
+hour13$lag3_prod <- hour13[ , .(lag3_prod = shift(hour13$production,n = 3,fill = NA))]
+
+test_start_index <- which(hour13$date == as.Date("2024-02-01"))
+train_data <- hour13[1:(test_start_index - 1), ]
+test_data13 <- hour13[test_start_index:(nrow(hour13)-2), ]
+
+hour13_m1_train <- lm(production ~ tcdc_low.cloud.layer_avg + 
+                   tcdc_entire.atmosphere_avg + 
+                   uswrf_surface_avg + 
+                   tmp_surface_avg + 
+                   -1, train_data)
+
+test_data13$Predicted <- predict(hour13_m1_train, test_data13)
+test_data13$Predicted[test_data13$Predicted < 0] <- 0
+test_data13$Predicted[test_data13$Predicted > 10] <- 10
+
+ggplot(test_data13 ,aes(x=date)) +
+        geom_line(aes(y=production,color='real')) + 
+        geom_line(aes(y=Predicted,color='predicted'))
+
+summary(hour13_m1_train)
+checkresiduals(hour13_m1_train)
+
+accuracy_metrics <- test_data13[,accu(production, Predicted)]
+accuracy_metrics
+
+forecast_horizon <- (nrow(hour13))
+forecast_data13 <- hour13[forecast_horizon, ]
+forecast_data13$Predicted <- predict(hour13_m1_train, newdata = forecast_data13)
+```
+Hour 14
+```{r}
+hour14 <- subset(merged_data, hour %in% c(14))
+
+hour14$lag2_prod <- hour14[ , .(lag2_prod = shift(hour14$production,n = 2,fill = NA))]
+hour14$lag3_prod <- hour14[ , .(lag3_prod = shift(hour14$production,n = 3,fill = NA))]
+
+test_start_index <- which(hour14$date == as.Date("2024-02-01"))
+train_data <- hour14[1:(test_start_index - 1), ]
+test_data14 <- hour14[test_start_index:(nrow(hour14)-2), ]
+
+hour14_m1_train <- lm(production ~ lag3_prod + 
+                   dswrf_surface_avg + 
+                   tcdc_low.cloud.layer_avg + 
+                   tcdc_entire.atmosphere_avg + 
+                   uswrf_top_of_atmosphere_avg + 
+                   tmp_surface_avg + 
+                   -1, train_data)
+
+test_data14$Predicted <- predict(hour14_m1_train, test_data14)
+test_data14$Predicted[test_data14$Predicted < 0] <- 0
+test_data14$Predicted[test_data14$Predicted > 10] <- 10
+
+ggplot(test_data14 ,aes(x=date)) +
+        geom_line(aes(y=production,color='real')) + 
+        geom_line(aes(y=Predicted,color='predicted'))
+
+summary(hour14_m1_train)
+checkresiduals(hour14_m1_train)
+
+accuracy_metrics <- test_data14[,accu(production, Predicted)]
+accuracy_metrics
+
+forecast_horizon <- (nrow(hour14))
+forecast_data14 <- hour14[forecast_horizon, ]
+forecast_data14$Predicted <- predict(hour14_m1_train, newdata = forecast_data14)
+```
+Hour 15
+```{r}
+hour15 <- subset(merged_data, hour %in% c(15))
+
+hour15$lag2_prod <- hour15[ , .(lag2_prod = shift(hour15$production,n = 2,fill = NA))]
+hour15$lag3_prod <- hour15[ , .(lag3_prod = shift(hour15$production,n = 3,fill = NA))]
+
+test_start_index <- which(hour15$date == as.Date("2024-02-01"))
+train_data <- hour15[1:(test_start_index - 1), ]
+test_data15 <- hour15[test_start_index:(nrow(hour15)-2), ]
+
+hour15_m1_train <- lm(production ~ lag2_prod + 
+                   dswrf_surface_avg + 
+                   tcdc_middle.cloud.layer_avg + 
+                   tcdc_entire.atmosphere_avg + 
+                   tmp_surface_avg + 
+                   month + 
+                   -1, train_data)
+
+test_data15$Predicted <- predict(hour15_m1_train, test_data15)
+test_data15$Predicted[test_data15$Predicted < 0] <- 0
+test_data15$Predicted[test_data15$Predicted > 10] <- 10
+
+ggplot(test_data15 ,aes(x=date)) +
+        geom_line(aes(y=production,color='real')) + 
+        geom_line(aes(y=Predicted,color='predicted'))
+
+summary(hour15_m1_train)
+checkresiduals(hour15_m1_train)
+
+accuracy_metrics <- test_data15[,accu(production, Predicted)]
+accuracy_metrics
+
+forecast_horizon <- (nrow(hour15))
+forecast_data15 <- hour15[forecast_horizon, ]
+forecast_data15$Predicted <- predict(hour15_m1_train, newdata = forecast_data15)
+```
+Hour 16
+```{r}
+hour16 <- subset(merged_data, hour %in% c(16))
+
+hour16$lag2_prod <- hour16[ , .(lag2_prod = shift(hour16$production,n = 2,fill = NA))]
+hour16$lag3_prod <- hour16[ , .(lag3_prod = shift(hour16$production,n = 3,fill = NA))]
+
+test_start_index <- which(hour16$date == as.Date("2024-02-01"))
+train_data <- hour16[1:(test_start_index - 1), ]
+test_data16 <- hour16[test_start_index:(nrow(hour16)-2), ]
+
+hour16_m1_train <- lm(production ~ lag2_prod + 
+                   lag3_prod + 
+                   dswrf_surface_avg + 
+                   tcdc_entire.atmosphere_avg + 
+                   tmp_surface_avg + 
+                   -1, train_data)
+
+test_data16$Predicted <- predict(hour16_m1_train, test_data16)
+test_data16$Predicted[test_data16$Predicted < 0] <- 0
+test_data16$Predicted[test_data16$Predicted > 10] <- 10
+
+ggplot(test_data16 ,aes(x=date)) +
+        geom_line(aes(y=production,color='real')) + 
+        geom_line(aes(y=Predicted,color='predicted'))
+
+summary(hour16_m1_train)
+checkresiduals(hour16_m1_train)
+
+accuracy_metrics <- test_data16[,accu(production, Predicted)]
+accuracy_metrics
+
+forecast_horizon <- (nrow(hour16))
+forecast_data16 <- hour16[forecast_horizon, ]
+forecast_data16$Predicted <- predict(hour16_m1_train, newdata = forecast_data16)
+```
+
+Hour 17
+```{r}
+hour17 <- subset(merged_data, hour %in% c(17))
+
+hour17$lag2_prod <- hour17[ , .(lag2_prod = shift(hour17$production,n = 2,fill = NA))]
+hour17$lag3_prod <- hour17[ , .(lag3_prod = shift(hour17$production,n = 3,fill = NA))]
+hour17$lag7_prod <- hour17[ , .(lag7_prod = shift(hour17$production,n = 7,fill = NA))]
+
+test_start_index <- which(hour17$date == as.Date("2024-02-01"))
+train_data <- hour17[1:(test_start_index - 1), ]
+test_data17 <- hour17[test_start_index:(nrow(hour17)-2), ]
+
+hour17_m1_train <- lm(production ~ lag2_prod + 
+                   lag3_prod +
+                    lag7_prod + 
+                   dswrf_surface_avg + 
+                   tcdc_high.cloud.layer_avg + 
+                   uswrf_surface_avg + 
+                   tmp_surface_avg + 
+                   -1, train_data)
+
+test_data17$Predicted <- predict(hour17_m1_train, test_data17)
+test_data17$Predicted[test_data17$Predicted < 0] <- 0
+test_data17$Predicted[test_data17$Predicted > 10] <- 10
+
+ggplot(test_data17 ,aes(x=date)) +
+        geom_line(aes(y=production,color='real')) + 
+        geom_line(aes(y=Predicted,color='predicted'))
+
+summary(hour17_m1_train)
+checkresiduals(hour17_m1_train)
+
+accuracy_metrics <- test_data17[,accu(production, Predicted)]
+accuracy_metrics
+
+forecast_horizon <- (nrow(hour17))
+forecast_data17 <- hour17[forecast_horizon, ]
+forecast_data17$Predicted <- predict(hour17_m1_train, newdata = forecast_data17)
+```
+Hour 18
+```{r}
+hour18 <- subset(merged_data, hour %in% c(18))
+
+hour18$lag2_prod <- hour18[ , .(lag2_prod = shift(hour18$production,n = 2,fill = NA))]
+hour18$lag3_prod <- hour18[ , .(lag3_prod = shift(hour18$production,n = 3,fill = NA))]
+
+test_start_index <- which(hour18$date == as.Date("2024-02-01"))
+train_data <- hour18[1:(test_start_index - 1), ]
+test_data18 <- hour18[test_start_index:(nrow(hour18)-2), ]
+
+hour18_m1_train <- lm(production ~ lag2_prod + 
+                   lag3_prod + 
+                    month + 
+                   -1, train_data)
+
+test_data18$Predicted <- predict(hour18_m1_train, test_data18)
+test_data18$Predicted[test_data18$Predicted < 0] <- 0
+test_data18$Predicted[test_data18$Predicted > 10] <- 10
+
+ggplot(test_data18 ,aes(x=date)) +
+        geom_line(aes(y=production,color='real')) + 
+        geom_line(aes(y=Predicted,color='predicted'))
+
+summary(hour18_m1_train)
+checkresiduals(hour18_m1_train)
+
+accuracy_metrics <- test_data18[,accu(production, Predicted)]
+accuracy_metrics
+
+forecast_horizon <- (nrow(hour18))
+forecast_data18 <- hour18[forecast_horizon, ]
+forecast_data18$Predicted <- predict(hour18_m1_train, newdata = forecast_data18)
+```
+
+```{r}
+test_data5$date <- as.Date(test_data5$date)
+test_data6$date <- as.Date(test_data6$date)
+
+test_data <- rbind(test_data5[,.(date,hour,production,Predicted)],
+                   test_data6[,.(date,hour,production,Predicted)],
+                   test_data7[,.(date,hour,production,Predicted)],
+                   test_data8[,.(date,hour,production,Predicted)],
+                   test_data9[,.(date,hour,production,Predicted)],
+                   test_data10[,.(date,hour,production,Predicted)],
+                   test_data11[,.(date,hour,production,Predicted)],
+                   test_data12[,.(date,hour,production,Predicted)],
+                   test_data13[,.(date,hour,production,Predicted)],
+                   test_data14[,.(date,hour,production,Predicted)],
+                   test_data15[,.(date,hour,production,Predicted)],
+                   test_data16[,.(date,hour,production,Predicted)],
+                   test_data17[,.(date,hour,production,Predicted)],
+                   test_data18[,.(date,hour,production,Predicted)])
+
+test_data <- test_data[order(date,hour)]
+test_data
+
+accuracy_metrics <- accu(test_data$production, test_data$Predicted)
+accuracy_metrics
+
+test_data$datetime <- as.POSIXct(paste(test_data$date, test_data$hour), format="%Y-%m-%d %H")
+
+ggplot(test_data[1:96], aes(x = datetime)) +
+        geom_line(aes(y=production,color='real')) + 
+        geom_line(aes(y=Predicted,color='predicted')) +
+        labs(title = "Predicted vs Real Production over Time", x = "Datetime", y = "Production", color = "Legend")
+        
+ggplot(test_data, aes(x = Predicted, y = production)) +
+  geom_point() + 
+  geom_abline(color = "red") +
+  labs(title = "Predicted vs Real Production", x = "Predicted", y = "Real")
+
+
+```
+```{r}
+forecasted_productions <- rbind(forecast_data5,
+                                forecast_data6,
+                                forecast_data7,
+                                forecast_data8,
+                                forecast_data9,
+                                forecast_data10,
+                                forecast_data11,
+                                forecast_data12,
+                                forecast_data13,
+                                forecast_data14,
+                                forecast_data15,
+                                forecast_data16,
+                                forecast_data17,
+                                forecast_data18, fill=TRUE)
+forecasted_productions[,c("date","hour","Predicted","production")]
+```
+
